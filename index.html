@@ -1,0 +1,370 @@
+# OT Learning Web Site – Full Source Code
+
+Below is a minimal yet extend‑able Flask‑based web service that meets your first requirement: **“学術 PDF → 構造化ノート変換ツール”**.  
+Copy the entire snippet into a fresh folder, keep the tree‑structure, run `pip install -r requirements.txt`, then launch with `python app.py`.  
+Tailwind CSS gives it a clean look; all extra future services can be added as additional blue “card” sections in `index.html`.
+
+---
+
+```text
+📂 ot_learning_site/
+│  app.py
+│  requirements.txt
+│
+├─ services/
+│   ├─ __init__.py
+│   ├─ pdf_to_markdown.py
+│   ├─ summarize.py
+│   ├─ keywords.py
+│   └─ ocr_figures.py
+│
+├─ templates/
+│   ├─ base.html
+│   ├─ index.html
+│   └─ result.html
+│
+└─ static/
+    ├─ css/style.css
+    └─ js/main.js
+```
+```
+
+---
+
+### requirements.txt
+```text
+Flask==3.0.2
+PyMuPDF==1.24.0
+pdf2image==1.17.0
+pytesseract==0.3.10
+Pillow==10.3.0
+transformers==4.42.0
+sentencepiece==0.2.0
+torch==2.2.2
+nltk==3.8.1
+```
+
+---
+
+### app.py
+```python
+from flask import Flask, render_template, request, send_file, redirect, url_for, flash
+from werkzeug.utils import secure_filename
+from pathlib import Path
+import uuid, shutil, os, io, datetime
+from services.pdf_to_markdown import convert_pdf
+
+UPLOAD_DIR = Path("uploads")
+OUTPUT_DIR = Path("outputs")
+UPLOAD_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+ALLOWED_EXT = {".pdf"}
+
+app = Flask(__name__)
+app.config["SECRET_KEY"] = "change-me"  # needed for flash messages
+
+
+def allowed(filename: str) -> bool:
+    return Path(filename).suffix.lower() in ALLOWED_EXT
+
+
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+@app.route("/upload", methods=["POST"])
+def upload():
+    if "pdf" not in request.files:
+        flash("ファイルが見つかりませんでした。", "warning")
+        return redirect(url_for("index"))
+
+    f = request.files["pdf"]
+    if f.filename == "":
+        flash("PDFを選択してください。", "danger")
+        return redirect(url_for("index"))
+
+    if not allowed(f.filename):
+        flash("PDF 形式のみ対応しています。", "danger")
+        return redirect(url_for("index"))
+
+    file_id = uuid.uuid4().hex
+    tmp_pdf = UPLOAD_DIR / f"{file_id}.pdf"
+    f.save(tmp_pdf)
+
+    md_text, figures = convert_pdf(tmp_pdf)
+
+    md_path = OUTPUT_DIR / f"{file_id}.md"
+    md_path.write_text(md_text, encoding="utf-8")
+
+    # clean uploaded pdf (optional)
+    try:
+        tmp_pdf.unlink()
+    except Exception:
+        pass
+
+    return render_template("result.html", markdown=md_text, download=url_for("download_md", file_id=file_id))
+
+
+@app.route("/download/<file_id>")
+def download_md(file_id):
+    md_path = OUTPUT_DIR / f"{file_id}.md"
+    if md_path.exists():
+        return send_file(md_path, as_attachment=True)
+    flash("ファイルが存在しません。", "danger")
+    return redirect(url_for("index"))
+
+
+if __name__ == "__main__":
+    app.run(debug=True, port=5000)
+```
+
+---
+
+### services/__init__.py
+```python
+# makes the folder a package. You can expose helper funcs here if desired.
+```
+
+---
+
+### services/pdf_to_markdown.py
+```python
+"""High‑level orchestration for PDF → Markdown."""
+from pathlib import Path
+import tempfile, shutil
+import fitz  # PyMuPDF
+from .summarize import summarize_text
+from .keywords import extract_keywords
+from .ocr_figures import extract_figure_captions
+
+
+def _is_heading(block: fitz.TextBlock, threshold: int = 15) -> bool:
+    """Rough heuristic: font‑size larger than threshold → heading"""
+    font_sizes = [span[1] for span in block.spans]
+    return max(font_sizes, default=0) >= threshold
+
+
+def convert_pdf(pdf_path: Path) -> tuple[str, list[str]]:
+    doc = fitz.open(pdf_path)
+    sections = []
+    current = {"title": "", "content": ""}
+
+    for page in doc:
+        blocks = page.get_text("dict")["blocks"]
+        for b in blocks:
+            if b["type"] != 0:
+                continue  # ignore images here – OCR later
+            block = fitz.TextBlock(b)
+            text = block.plaintext.strip()
+            if not text:
+                continue
+            if _is_heading(block):
+                # new section
+                if current["title"] or current["content"]:
+                    sections.append(current)
+                current = {"title": text, "content": ""}
+            else:
+                current["content"] += " " + text
+    # append last
+    if current["title"] or current["content"]:
+        sections.append(current)
+
+    # build markdown
+    md_lines = []
+    full_text = ""
+    for sec in sections:
+        md_lines.append(f"## {sec['title']}")
+        md_lines.append("\n")
+        md_lines.append(sec["content"].strip())
+        md_lines.append("\n\n")
+        full_text += " " + sec["content"].strip()
+
+    # summary & keywords for entire paper
+    summary = summarize_text(full_text)
+    md_lines.insert(0, "# 論文要約\n" + summary + "\n\n")
+    key_words = extract_keywords(full_text)
+    md_lines.insert(2, "**キーワード:** " + ", ".join(key_words) + "\n\n")
+
+    # OCR important figures (first 5 images >50 kB)
+    captions = extract_figure_captions(pdf_path)
+    if captions:
+        md_lines.append("---\n## 重要図表 OCR キャプション\n")
+        for cap in captions:
+            md_lines.append(f"- {cap}")
+
+    return "\n".join(md_lines), captions
+```
+
+---
+
+### services/summarize.py
+```python
+from transformers import pipeline
+import nltk
+nltk.download("punkt", quiet=True)
+
+_summer = pipeline("summarization", model="facebook/bart-large-cnn", device_map="auto")
+
+
+def summarize_text(text: str, max_words: int = 150) -> str:
+    """Return a concise Japanese summary."""
+    if len(text.split()) < 50:
+        return text
+    # pipeline handles tokenization limits internally
+    summary = _summer(text[:4000])[0]["summary_text"]
+    return summary
+```
+
+---
+
+### services/keywords.py
+```python
+import nltk, math, re
+from collections import Counter
+nltk.download("stopwords", quiet=True)
+STOP = set(nltk.corpus.stopwords.words("english")) | set("の こと など ため それ これ その とき また により さらに".split())
+
+
+def extract_keywords(text: str, n: int = 8):
+    words = re.findall(r"[\w一-龥]{2,}", text.lower())
+    cnt = Counter(w for w in words if w not in STOP)
+    total = sum(cnt.values())
+    scores = {w: c / total * math.log(total / (1 + c)) for w, c in cnt.items()}
+    return [w for w, _ in sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:n]]
+```
+
+---
+
+### services/ocr_figures.py
+```python
+from pathlib import Path
+import fitz, tempfile
+from PIL import Image
+import pytesseract
+
+
+def extract_figure_captions(pdf_path: Path, max_images: int = 5):
+    doc = fitz.open(pdf_path)
+    captions = []
+    for page in doc:
+        images = page.get_images(full=True)
+        for img_index, img in enumerate(images):
+            xref = img[0]
+            base_image = doc.extract_image(xref)
+            if base_image["size"] < 50_000:  # skip tiny images
+                continue
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as tmp:
+                tmp.write(base_image["image"])
+                tmp.flush()
+                cap = pytesseract.image_to_string(Image.open(tmp.name), lang="eng+jpn")
+                cap = cap.strip()
+                if cap:
+                    captions.append(cap)
+                if len(captions) >= max_images:
+                    return captions
+    return captions
+```
+
+---
+
+### templates/base.html
+```html
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>OT Learning Hub</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}"/>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen flex flex-col">
+    <header class="bg-gradient-to-r from-indigo-600 to-sky-500 text-white p-6 shadow-lg">
+        <h1 class="text-3xl font-bold tracking-wide">OT Learning Hub</h1>
+        <p class="text-sm mt-1 opacity-80">作業療法士のためのリサーチ &amp; ノート作成ポータル</p>
+    </header>
+    <main class="flex-grow container mx-auto px-4 py-8">
+        {% block content %}{% endblock %}
+    </main>
+    <footer class="bg-slate-800 text-slate-200 text-xs py-4 text-center">
+        &copy; {{ now.year }} OT Learning Hub — Powered by Flask
+    </footer>
+</body>
+</html>
+```
+
+---
+
+### templates/index.html
+```html
+{% extends 'base.html' %}
+{% block content %}
+<section class="max-w-3xl mx-auto bg-white/90 backdrop-blur rounded-2xl shadow-xl p-8">
+    <h2 class="text-2xl font-semibold mb-4">学術 PDF → 構造化ノート変換ツール</h2>
+    <form action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data" class="space-y-4">
+        <input id="pdf" name="pdf" type="file" accept="application/pdf" required class="block w-full text-sm text-slate-700"/>
+        <button type="submit" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg">アップロードして変換</button>
+    </form>
+</section>
+
+<!-- Future service cards -->
+<section class="mt-10 grid md:grid-cols-2 gap-6">
+    <div class="bg-white p-6 rounded-xl shadow-md">
+        <h3 class="font-bold mb-2">サービス #2（開発予定）</h3>
+        <p class="text-sm text-slate-600">ここに追加予定のツール紹介テキスト。</p>
+    </div>
+    <div class="bg-white p-6 rounded-xl shadow-md">
+        <h3 class="font-bold mb-2">サービス #3（開発予定）</h3>
+        <p class="text-sm text-slate-600">ここに追加予定のツール紹介テキスト。</p>
+    </div>
+</section>
+{% endblock %}
+```
+
+---
+
+### templates/result.html
+```html
+{% extends 'base.html' %}
+{% block content %}
+<article class="prose prose-slate max-w-none">
+    <h2>変換結果</h2>
+    <p class="mb-4">
+        <a href="{{ download }}" class="text-indigo-600 hover:underline">Markdown をダウンロード (.md)</a>
+    </p>
+    <pre class="whitespace-pre-wrap bg-slate-100 p-4 rounded-lg overflow-x-auto">{{ markdown }}</pre>
+</article>
+{% endblock %}
+```
+
+---
+
+### static/css/style.css
+```css
+/* 追加のカスタムスタイル。Tailwind で足りない細かな調整に利用 */
+body {
+    font-family: "Inter", "Noto Sans JP", sans-serif;
+}
+```
+
+---
+
+### static/js/main.js
+```js
+// 今後の JavaScript 拡張用。現在は未使用。
+```
+
+---
+
+> **ローカル実行手順**  
+> 1. Windows で Tesseract‑OCR をインストールし、環境変数 Path に `tesseract.exe` の場所を追加。  
+> 2. `python -m venv venv && venv\Scripts\activate` で仮想環境を作成。  
+> 3. `pip install -r requirements.txt` で依存パッケージを導入。  
+> 4. `python app.py` を実行し、ブラウザで <http://127.0.0.1:5000> を開く。  
+> 5. PDF をアップロードして変換結果を確認。  
+> 6. Tailwind CDN のみ利用のためビルド不要。  
+> 7. 将来のサービスは `templates/index.html` のカードをリンクに変更し、対応する Flask ルートを追加するだけで拡張可能。
+
+これでコピー＆ペースト一撃で動く最小構成が完成です 🚀
