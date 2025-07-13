@@ -1,36 +1,141 @@
-# OT Learning Hub – Revamped v1.1  
-# =====================================
-# 📁 Improved project tree
-# (copy‑paste the whole snippet into a fresh folder)
+# OT Learning Service – **Clean Re‑Boot (Frontend + Backend Split)**
 
+以下は **静的フロントエンド (GitHub Pages 等で配信)** と **API バックエンド (Render/Fly.io などにデプロイ)** を完全に分離した新構成です。
+- **フロント**はプレーン HTML+Tailwind+Fetch API だけ。サーバーサイドテンプレートは使わないので、GitHub Pages 上でもそのまま動きます。
+- **バックエンド**は FastAPI。`/convert` に PDF を POST すると Markdown を JSON で返し、`/download/{id}` で .md ファイルを返します。CORS 設定済み。
+- **Dockerfile** 付き。Render なら “Docker” モードでリポジトリを指すだけで HTTPS API が立ち上がります。
+
+---
+
+## 📁 プロジェクト構成
 ```text
-📂 ot_learning_site/
-│  app.py
-│  requirements.txt
-│  README.md
+📂 ot_learning_service/
 │
-├─ services/
-│   ├─ __init__.py
-│   ├─ pdf_to_markdown.py
-│   ├─ summarize.py
-│   ├─ keywords.py
-│   └─ ocr_figures.py
-│
-├─ templates/
-│   ├─ base.html
+├─ frontend/
 │   ├─ index.html
-│   └─ result.html
+│   ├─ styles.css        # 任意の追加 CSS (最小限のみ)
+│   └─ app.js            # 変換リクエスト & UI 制御
 │
-└─ static/
-    ├─ css/style.css
-    └─ js/main.js
+└─ backend/
+    ├─ main.py           # FastAPI アプリ本体
+    ├─ requirements.txt
+    ├─ Dockerfile        # コンテナ化 (Render/Fly 用)
+    ├─ services/
+    │    ├─ __init__.py
+    │    ├─ pdf_to_markdown.py
+    │    ├─ summarize.py
+    │    ├─ keywords.py
+    │    └─ ocr_figures.py
+    └─ storage/          # 生成ファイル保存 (自動生成)
 ```
 
 ---
 
-### requirements.txt
+# ✨ Frontend
+
+### frontend/index.html
+```html
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OT Learning Hub</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="min-h-screen flex flex-col bg-gradient-to-br from-indigo-50 to-sky-100">
+  <header class="bg-white/80 backdrop-blur shadow sticky top-0 z-50">
+    <div class="max-w-4xl mx-auto px-6 py-4 flex items-center gap-2 text-indigo-700 font-semibold">
+      <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6l4 2" /></svg>
+      OT Learning Hub
+    </div>
+  </header>
+
+  <main class="flex-grow container max-w-4xl mx-auto px-6 py-10">
+    <section class="bg-white/90 backdrop-blur p-10 rounded-3xl shadow-xl">
+      <h1 class="text-2xl font-bold mb-6">学術 PDF → Markdown 変換</h1>
+      <form id="convertForm" class="space-y-4">
+        <input id="pdfInput" type="file" accept="application/pdf" required
+               class="file:mr-4 file:px-4 file:py-2 file:rounded-lg file:border-0 file:bg-indigo-600 file:text-white hover:file:bg-indigo-700 text-sm" />
+        <button id="submitBtn" type="submit"
+                class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg shadow">変換実行</button>
+      </form>
+      <p id="status" class="mt-4 text-sm text-slate-600"></p>
+    </section>
+
+    <section id="resultSection" class="hidden mt-10 bg-white/90 backdrop-blur p-8 rounded-3xl shadow-xl">
+      <div class="flex justify-between items-center mb-4">
+        <h2 class="text-xl font-semibold">変換結果</h2>
+        <a id="downloadLink" href="#" class="text-indigo-600 hover:underline" download>Markdown をダウンロード</a>
+      </div>
+      <pre id="markdownOutput" class="whitespace-pre-wrap overflow-x-auto bg-slate-100 p-4 rounded-xl text-sm"></pre>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
+```
+
+### frontend/app.js
+```js
+// ======== 設定 ========
+// バックエンド FastAPI の URL（Render 等にデプロイ後に書き換え）
+const BACKEND_URL = "https://ot-learning-api.onrender.com"; // ←例
+// ======================
+
+const form = document.getElementById("convertForm");
+const pdfInput = document.getElementById("pdfInput");
+const statusP = document.getElementById("status");
+const resultSec = document.getElementById("resultSection");
+const markdownOutput = document.getElementById("markdownOutput");
+const downloadLink = document.getElementById("downloadLink");
+
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const file = pdfInput.files[0];
+  if (!file) return;
+
+  statusP.textContent = "アップロード中…";
+  const fd = new FormData();
+  fd.append("pdf", file);
+
+  try {
+    const res = await fetch(`${BACKEND_URL}/convert`, {
+      method: "POST",
+      body: fd,
+    });
+    if (!res.ok) throw new Error(`Server responded ${res.status}`);
+    const data = await res.json();
+
+    markdownOutput.textContent = data.markdown;
+    downloadLink.href = `${BACKEND_URL}/download/${data.file_id}`;
+
+    statusP.textContent = "変換完了！";
+    resultSec.classList.remove("hidden");
+    // スクロール
+    resultSec.scrollIntoView({ behavior: "smooth" });
+  } catch (err) {
+    console.error(err);
+    statusP.textContent = "エラーが発生しました。PDF が正しいか確認してください。";
+  }
+});
+```
+
+### frontend/styles.css (任意)
+```css
+body {font-family: "Inter", "Noto Sans JP", sans-serif;}
+```
+
+---
+
+# 🚀 Backend (FastAPI)
+
+### backend/requirements.txt
 ```text
-Flask==3.0.2
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
 PyMuPDF==1.24.0
 pdf2image==1.17.0
 pytesseract==0.3.10
@@ -39,112 +144,87 @@ transformers==4.42.0
 sentencepiece==0.2.0
 torch==2.2.2
 nltk==3.8.1
+python‑multipart==0.0.6
 ```
 
----
-
-### README.md (🔍 原因と修正ポイントまとめ)
-```markdown
-## ❗ 変換が動かなかった主原因
-1. **PyMuPDF API 誤用** – `fitz.TextBlock` は存在しないクラスでした。
-2. **画像 size 判定** – `extract_image()` の戻り dict に `size` キーは無く、`len(img['image'])` で判定する必要があります。
-3. **巨大テキストの要約** – BART のトークン制限を超えるとクラッシュ。チャンク化で解決。
-
-## 🩹 主な改善
-- PDF → Markdown パイプラインを全面再実装（2‑pass 解析で見出し抽出）。
-- エラーログとユーザ向け flash メッセージを追加。
-- UI を Tailwind + Lucide icons でリファイン。
-```
-
----
-
-### app.py
+### backend/main.py
 ```python
-from flask import Flask, render_template, request, send_file, redirect, url_for, flash
-from werkzeug.utils import secure_filename
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
-import uuid, logging
+import uuid, shutil, logging
 from services.pdf_to_markdown import convert_pdf
 
-# ---------- paths & config ----------
 BASE_DIR = Path(__file__).resolve().parent
-UPLOAD_DIR = BASE_DIR / "uploads"
-OUTPUT_DIR = BASE_DIR / "outputs"
-for p in (UPLOAD_DIR, OUTPUT_DIR):
-    p.mkdir(exist_ok=True)
-ALLOWED_EXT = {".pdf"}
+STORAGE = BASE_DIR / "storage"
+STORAGE.mkdir(exist_ok=True)
 
-# ---------- logging ----------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler(BASE_DIR / "server.log"), logging.StreamHandler()],
+app = FastAPI(title="OT Learning API")
+
+# CORS (フロント URL を登録 / * でも可)
+origins = ["*"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
-logger = logging.getLogger(__name__)
 
-# ---------- app ----------
-app = Flask(__name__)
-app.config["SECRET_KEY"] = "change‑me‑in‑prod"
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-def allowed(filename: str) -> bool:
-    return Path(filename).suffix.lower() in ALLOWED_EXT
+@app.post("/convert")
+async def convert(pdf: UploadFile = File(...)):
+    if pdf.content_type != "application/pdf":
+        raise HTTPException(status_code=415, detail="PDF only")
 
-@app.route("/")
-def index():
-    return render_template("index.html")
-
-@app.route("/upload", methods=["POST"])
-def upload():
-    pdf = request.files.get("pdf")
-    if not pdf or pdf.filename == "":
-        flash("PDF を選択してください。", "warning")
-        return redirect(url_for("index"))
-    if not allowed(pdf.filename):
-        flash("PDF 形式のみ対応しています。", "danger")
-        return redirect(url_for("index"))
-
-    # ---------- save ----------
     file_id = uuid.uuid4().hex
-    pdf_path = UPLOAD_DIR / f"{file_id}.pdf"
-    pdf.save(pdf_path)
-    logger.info("Uploaded %s", pdf_path.name)
+    pdf_path = STORAGE / f"{file_id}.pdf"
+    md_path = STORAGE / f"{file_id}.md"
 
-    # ---------- convert ----------
+    # save
+    with pdf_path.open("wb") as f:
+        shutil.copyfileobj(pdf.file, f)
+    logging.info("Saved %s", pdf_path.name)
+
     try:
-        md_text = convert_pdf(pdf_path)
+        markdown = convert_pdf(pdf_path)
     except Exception as e:
-        logger.exception("Conversion failed: %s", e)
-        flash("変換中にエラーが発生しました。PDF が研究論文形式か確認してください。", "danger")
-        return redirect(url_for("index"))
+        logging.exception("convert failed: %s", e)
+        raise HTTPException(status_code=500, detail="conversion error")
 
-    md_path = OUTPUT_DIR / f"{file_id}.md"
-    md_path.write_text(md_text, encoding="utf-8")
+    md_path.write_text(markdown, encoding="utf-8")
+    return {"file_id": file_id, "markdown": markdown}
 
-    flash("変換成功！", "success")
-    return render_template("result.html", markdown=md_text, download=url_for("download_md", file_id=file_id))
-
-@app.route("/download/<file_id>")
-def download_md(file_id):
-    md_path = OUTPUT_DIR / f"{file_id}.md"
-    if md_path.exists():
-        return send_file(md_path, as_attachment=True)
-    flash("ファイルが存在しません。", "danger")
-    return redirect(url_for("index"))
-
-if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+@app.get("/download/{file_id}")
+async def download(file_id: str):
+    md_path = STORAGE / f"{file_id}.md"
+    if not md_path.exists():
+        raise HTTPException(status_code=404, detail="not found")
+    return FileResponse(md_path, media_type="text/markdown", filename=f"{file_id}.md")
 ```
 
----
+### backend/Dockerfile
+```dockerfile
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+```
 
-### services/__init__.py
+### backend/services/ 以下
+
+> **変換ロジックは前回と同様** ですが、`fitz.TextBlock` バグ修正等は反映済み。全文は長くなるため ➡️ [pdf_to_markdown.py ほかは変わっていません] として省略せずに**全部**載せます。
+
+#### backend/services/__init__.py
 ```python
-# Just to mark the folder as a module.
+# services package marker
 ```
 
----
-
-### services/pdf_to_markdown.py
+#### backend/services/pdf_to_markdown.py
 ```python
 """PDF → Markdown conversion pipeline (2‑pass heading detection)."""
 from pathlib import Path
@@ -176,15 +256,12 @@ def _text_from_block(block_dict):
 # ---------- main ----------
 
 def convert_pdf(pdf_path: Path) -> str:
-    logger.info("Converting %s", pdf_path)
+    logger.info("Converting %s", pdf_path.name)
     doc = fitz.open(pdf_path)
 
-    # pass‑1: font stats
-    body_size = statistics.mode(round(s) for s in _collect_font_sizes(doc))  # most common size
-    heading_threshold = body_size + 1  # crude heuristic
-    logger.info("Body font ≈ %s pt; heading ≥ %s pt", body_size, heading_threshold)
+    body_size = statistics.mode(round(s) for s in _collect_font_sizes(doc))
+    heading_threshold = body_size + 1
 
-    # pass‑2: sectioning
     sections = []
     current = {"title": "", "content": ""}
 
@@ -205,14 +282,12 @@ def convert_pdf(pdf_path: Path) -> str:
     if current["title"] or current["content"]:
         sections.append(current)
 
-    # Markdown build
-    md_lines = []
     full_text = " ".join(sec["content"] for sec in sections)
 
-    # summary & keywords
-    summary = summarize_text(full_text)
-    md_lines.append("# 論文要約\n" + summary + "\n")
-    md_lines.append("**キーワード:** " + ", ".join(extract_keywords(full_text)) + "\n\n")
+    md_lines = [
+        "# 論文要約\n" + summarize_text(full_text) + "\n",
+        "**キーワード:** " + ", ".join(extract_keywords(full_text)) + "\n\n",
+    ]
 
     for sec in sections:
         if sec["title"]:
@@ -220,7 +295,6 @@ def convert_pdf(pdf_path: Path) -> str:
         md_lines.append(textwrap.fill(sec["content"].strip(), 120))
         md_lines.append("\n")
 
-    # figures
     captions = extract_figure_captions(pdf_path)
     if captions:
         md_lines.append("---\n## 重要図表 OCR キャプション\n")
@@ -229,11 +303,9 @@ def convert_pdf(pdf_path: Path) -> str:
     return "\n".join(md_lines)
 ```
 
----
-
-### services/summarize.py
+#### backend/services/summarize.py
 ```python
-import nltk, textwrap, logging
+import nltk, logging
 from transformers import pipeline
 nltk.download("punkt", quiet=True)
 logger = logging.getLogger(__name__)
@@ -241,31 +313,25 @@ logger = logging.getLogger(__name__)
 try:
     _summarizer = pipeline("summarization", model="facebook/bart-large-cnn", device_map="auto")
 except Exception as e:
-    logger.warning("transformers pipeline unavailable (%s) – falling back to naive summarizer", e)
+    logger.warning("transformers unavailable (%s) – fallback", e)
     _summarizer = None
 
-
-def summarize_text(text: str, max_words: int = 120):
+def summarize_text(text: str):
     if not text:
-        return "(内容が空です)"
+        return "(内容がありません)"
     if _summarizer:
-        # chunk to avoid token limit
-        chunks = nltk.tokenize.sent_tokenize(text)
-        half = len(chunks) // 2 or 1
-        head = " ".join(chunks[:half])
-        return _summarizer(head)[0]["summary_text"]
-    # fallback: first few sentences
-    return " ".join(chunks[:3])
+        # 簡易チャンク: 4k 文字以内に抑制
+        return _summarizer(text[:4000])[0]["summary_text"]
+    return " ".join(nltk.sent_tokenize(text)[:3])
 ```
 
----
-
-### services/keywords.py
+#### backend/services/keywords.py
 ```python
-import nltk, re
+import re, nltk
 from collections import Counter
 nltk.download("stopwords", quiet=True)
-STOP = set(nltk.corpus.stopwords.words("english")) | set("の こと など また ため それ これ その".split())
+JP_STOP = set("の こと など また ため それ これ その より 及び".split())
+STOP = set(nltk.corpus.stopwords.words("english")) | JP_STOP
 
 def extract_keywords(text: str, n: int = 8):
     words = re.findall(r"[\w一-龥]{2,}", text.lower())
@@ -273,15 +339,12 @@ def extract_keywords(text: str, n: int = 8):
     return [w for w, _ in cnt.most_common(n)]
 ```
 
----
-
-### services/ocr_figures.py
+#### backend/services/ocr_figures.py
 ```python
 from pathlib import Path
 import fitz, tempfile
 from PIL import Image
 import pytesseract, logging
-
 logger = logging.getLogger(__name__)
 
 
@@ -307,91 +370,23 @@ def extract_figure_captions(pdf_path: Path, max_images: int = 5):
 
 ---
 
-### templates/base.html
-```html
-<!DOCTYPE html>
-<html lang="ja" data-theme="light">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>OT Learning Hub</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://unpkg.com/lucide@latest"></script>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
-</head>
-<body class="min-h-screen bg-gradient-to-br from-sky-50 to-indigo-100 flex flex-col">
-  <header class="shadow-sm bg-white/80 backdrop-blur sticky top-0 z-50">
-    <div class="max-w-5xl mx-auto px-6 py-4 flex items-center gap-3">
-      <i data-lucide="book-open" class="w-6 h-6 text-indigo-600"></i>
-      <span class="text-xl font-semibold tracking-wide text-slate-800">OT Learning Hub</span>
-    </div>
-  </header>
-  <main class="flex-grow container max-w-5xl mx-auto px-6 py-10">
-    {% with msgs = get_flashed_messages(with_categories=true) %}
-    {% if msgs %}
-      <ul class="space-y-2 mb-6">
-        {% for cat, msg in msgs %}
-          <li class="px-4 py-2 rounded-lg {{ 'bg-green-100 text-green-800' if cat=='success' else ('bg-red-100 text-red-800' if cat=='danger' else 'bg-yellow-100 text-yellow-800') }}">{{ msg }}</li>
-        {% endfor %}
-      </ul>
-    {% endif %}
-    {% endwith %}
-    {% block content %}{% endblock %}
-  </main>
-  <footer class="text-center text-xs py-6 text-slate-600">© {{ now.year }} OT Learning Hub</footer>
-  <script>lucide.createIcons();</script>
-</body>
-</html>
-```
+## 🏗️ デプロイ手順 (最速例)
+1. **GitHub リポジトリを作成**。`frontend/` と `backend/` をコミット。
+2. GitHub Pages を `frontend/` で有効化 (ブランチ `main` / ディレクトリ `frontend`).
+3. **Render** で “+ New → Web Service → Docker” を選択し、リポジトリの `backend/` サブフォルダを指定。
+   - Dockerfile ビルドでそのまま起動。
+   - URL 例: `https://ot-learning-api.onrender.com` を BACKEND_URL に設定。
+4. DNS/ドメインを張れば完成。フロントは静的に、API はクラウドランタイムで動きます。
 
----
+> **ローカルテスト**:
+> ```bash
+> # backend
+> cd backend
+> python -m venv venv && source venv/bin/activate
+> pip install -r requirements.txt
+> uvicorn main:app --reload --port 8000
+> # frontend
+> Live Server などで `frontend/index.html` を開く → BACKEND_URL を `http://localhost:8000` に変更
+> ```
 
-### templates/index.html
-```html
-{% extends 'base.html' %}
-{% block content %}
-<section class="bg-white/90 backdrop-blur shadow-xl rounded-3xl p-10">
-  <h2 class="text-2xl font-semibold mb-6 flex items-center gap-2"><i data-lucide="upload"></i> 学術 PDF → Markdown 変換</h2>
-  <form action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data" class="space-y-4">
-    <input name="pdf" type="file" accept="application/pdf" required class="file:mr-4 file:px-4 file:py-2 file:rounded-lg file:border-0 file:bg-indigo-600 file:text-white hover:file:bg-indigo-700 text-sm text-slate-700" />
-    <button type="submit" class="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg shadow-md"><i data-lucide="play"></i> 変換実行</button>
-  </form>
-</section>
-{% endblock %}
-```
-
----
-
-### templates/result.html
-```html
-{% extends 'base.html' %}
-{% block content %}
-<article class="prose max-w-none bg-white/90 backdrop-blur p-8 rounded-3xl shadow-xl">
-  <h2 class="flex items-center gap-2"><i data-lucide="file-text"></i> 変換結果</h2>
-  <p class="mb-4">
-    <a href="{{ download }}" class="text-indigo-600 hover:underline flex items-center gap-1"><i data-lucide="download"></i> Markdown をダウンロード</a>
-  </p>
-  <pre class="whitespace-pre-wrap overflow-x-auto bg-slate-100/80 p-4 rounded-xl">{{ markdown }}</pre>
-</article>
-{% endblock %}
-```
-
----
-
-### static/css/style.css
-```css
-body {font-family: "Inter", "Noto Sans JP", sans-serif;}
-```
-
----
-
-### static/js/main.js
-```js
-// Reserved for future interactive features.
-```
-
----
-
-```
-# ⬆️ END OF FILES
-```
+これで “文字だらけ” 問題（テンプレート未解釈）と “ページ到達できない” 問題（GitHub Pages は静的のみ）を根本解決できます。コピペ & デプロイでお試しください 🚀
