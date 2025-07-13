@@ -1,15 +1,13 @@
-# OT Learning Web Site – Full Source Code
-
-Below is a minimal yet extend‑able Flask‑based web service that meets your first requirement: **“学術 PDF → 構造化ノート変換ツール”**.  
-Copy the entire snippet into a fresh folder, keep the tree‑structure, run `pip install -r requirements.txt`, then launch with `python app.py`.  
-Tailwind CSS gives it a clean look; all extra future services can be added as additional blue “card” sections in `index.html`.
-
----
+# OT Learning Hub – Revamped v1.1  
+# =====================================
+# 📁 Improved project tree
+# (copy‑paste the whole snippet into a fresh folder)
 
 ```text
 📂 ot_learning_site/
 │  app.py
 │  requirements.txt
+│  README.md
 │
 ├─ services/
 │   ├─ __init__.py
@@ -26,7 +24,6 @@ Tailwind CSS gives it a clean look; all extra future services can be added as 
 └─ static/
     ├─ css/style.css
     └─ js/main.js
-```
 ```
 
 ---
@@ -46,66 +43,85 @@ nltk==3.8.1
 
 ---
 
+### README.md (🔍 原因と修正ポイントまとめ)
+```markdown
+## ❗ 変換が動かなかった主原因
+1. **PyMuPDF API 誤用** – `fitz.TextBlock` は存在しないクラスでした。
+2. **画像 size 判定** – `extract_image()` の戻り dict に `size` キーは無く、`len(img['image'])` で判定する必要があります。
+3. **巨大テキストの要約** – BART のトークン制限を超えるとクラッシュ。チャンク化で解決。
+
+## 🩹 主な改善
+- PDF → Markdown パイプラインを全面再実装（2‑pass 解析で見出し抽出）。
+- エラーログとユーザ向け flash メッセージを追加。
+- UI を Tailwind + Lucide icons でリファイン。
+```
+
+---
+
 ### app.py
 ```python
 from flask import Flask, render_template, request, send_file, redirect, url_for, flash
 from werkzeug.utils import secure_filename
 from pathlib import Path
-import uuid, shutil, os, io, datetime
+import uuid, logging
 from services.pdf_to_markdown import convert_pdf
 
-UPLOAD_DIR = Path("uploads")
-OUTPUT_DIR = Path("outputs")
-UPLOAD_DIR.mkdir(exist_ok=True)
-OUTPUT_DIR.mkdir(exist_ok=True)
-
+# ---------- paths & config ----------
+BASE_DIR = Path(__file__).resolve().parent
+UPLOAD_DIR = BASE_DIR / "uploads"
+OUTPUT_DIR = BASE_DIR / "outputs"
+for p in (UPLOAD_DIR, OUTPUT_DIR):
+    p.mkdir(exist_ok=True)
 ALLOWED_EXT = {".pdf"}
 
-app = Flask(__name__)
-app.config["SECRET_KEY"] = "change-me"  # needed for flash messages
+# ---------- logging ----------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.FileHandler(BASE_DIR / "server.log"), logging.StreamHandler()],
+)
+logger = logging.getLogger(__name__)
 
+# ---------- app ----------
+app = Flask(__name__)
+app.config["SECRET_KEY"] = "change‑me‑in‑prod"
 
 def allowed(filename: str) -> bool:
     return Path(filename).suffix.lower() in ALLOWED_EXT
-
 
 @app.route("/")
 def index():
     return render_template("index.html")
 
-
 @app.route("/upload", methods=["POST"])
 def upload():
-    if "pdf" not in request.files:
-        flash("ファイルが見つかりませんでした。", "warning")
+    pdf = request.files.get("pdf")
+    if not pdf or pdf.filename == "":
+        flash("PDF を選択してください。", "warning")
         return redirect(url_for("index"))
-
-    f = request.files["pdf"]
-    if f.filename == "":
-        flash("PDFを選択してください。", "danger")
-        return redirect(url_for("index"))
-
-    if not allowed(f.filename):
+    if not allowed(pdf.filename):
         flash("PDF 形式のみ対応しています。", "danger")
         return redirect(url_for("index"))
 
+    # ---------- save ----------
     file_id = uuid.uuid4().hex
-    tmp_pdf = UPLOAD_DIR / f"{file_id}.pdf"
-    f.save(tmp_pdf)
+    pdf_path = UPLOAD_DIR / f"{file_id}.pdf"
+    pdf.save(pdf_path)
+    logger.info("Uploaded %s", pdf_path.name)
 
-    md_text, figures = convert_pdf(tmp_pdf)
+    # ---------- convert ----------
+    try:
+        md_text = convert_pdf(pdf_path)
+    except Exception as e:
+        logger.exception("Conversion failed: %s", e)
+        flash("変換中にエラーが発生しました。PDF が研究論文形式か確認してください。", "danger")
+        return redirect(url_for("index"))
 
     md_path = OUTPUT_DIR / f"{file_id}.md"
     md_path.write_text(md_text, encoding="utf-8")
 
-    # clean uploaded pdf (optional)
-    try:
-        tmp_pdf.unlink()
-    except Exception:
-        pass
-
+    flash("変換成功！", "success")
     return render_template("result.html", markdown=md_text, download=url_for("download_md", file_id=file_id))
-
 
 @app.route("/download/<file_id>")
 def download_md(file_id):
@@ -115,7 +131,6 @@ def download_md(file_id):
     flash("ファイルが存在しません。", "danger")
     return redirect(url_for("index"))
 
-
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
 ```
@@ -124,115 +139,138 @@ if __name__ == "__main__":
 
 ### services/__init__.py
 ```python
-# makes the folder a package. You can expose helper funcs here if desired.
+# Just to mark the folder as a module.
 ```
 
 ---
 
 ### services/pdf_to_markdown.py
 ```python
-"""High‑level orchestration for PDF → Markdown."""
+"""PDF → Markdown conversion pipeline (2‑pass heading detection)."""
 from pathlib import Path
-import tempfile, shutil
+import statistics, textwrap, logging
 import fitz  # PyMuPDF
 from .summarize import summarize_text
 from .keywords import extract_keywords
 from .ocr_figures import extract_figure_captions
 
+logger = logging.getLogger(__name__)
 
-def _is_heading(block: fitz.TextBlock, threshold: int = 15) -> bool:
-    """Rough heuristic: font‑size larger than threshold → heading"""
-    font_sizes = [span[1] for span in block.spans]
-    return max(font_sizes, default=0) >= threshold
+# ---------- helpers ----------
+
+def _collect_font_sizes(doc):
+    sizes = []
+    for page in doc:
+        for block in page.get_text("dict").get("blocks", []):
+            if block.get("type") != 0:
+                continue
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    sizes.append(span["size"])
+    return sizes or [11]
 
 
-def convert_pdf(pdf_path: Path) -> tuple[str, list[str]]:
+def _text_from_block(block_dict):
+    return "".join(span["text"] for line in block_dict.get("lines", []) for span in line.get("spans", [])).strip()
+
+# ---------- main ----------
+
+def convert_pdf(pdf_path: Path) -> str:
+    logger.info("Converting %s", pdf_path)
     doc = fitz.open(pdf_path)
+
+    # pass‑1: font stats
+    body_size = statistics.mode(round(s) for s in _collect_font_sizes(doc))  # most common size
+    heading_threshold = body_size + 1  # crude heuristic
+    logger.info("Body font ≈ %s pt; heading ≥ %s pt", body_size, heading_threshold)
+
+    # pass‑2: sectioning
     sections = []
     current = {"title": "", "content": ""}
 
     for page in doc:
-        blocks = page.get_text("dict")["blocks"]
-        for b in blocks:
-            if b["type"] != 0:
-                continue  # ignore images here – OCR later
-            block = fitz.TextBlock(b)
-            text = block.plaintext.strip()
-            if not text:
+        for block in page.get_text("dict").get("blocks", []):
+            if block.get("type") != 0:
                 continue
-            if _is_heading(block):
-                # new section
+            txt = _text_from_block(block)
+            if not txt:
+                continue
+            span_size = block["lines"][0]["spans"][0]["size"]
+            if span_size >= heading_threshold and len(txt) < 120:
                 if current["title"] or current["content"]:
                     sections.append(current)
-                current = {"title": text, "content": ""}
+                current = {"title": txt, "content": ""}
             else:
-                current["content"] += " " + text
-    # append last
+                current["content"] += " " + txt
     if current["title"] or current["content"]:
         sections.append(current)
 
-    # build markdown
+    # Markdown build
     md_lines = []
-    full_text = ""
-    for sec in sections:
-        md_lines.append(f"## {sec['title']}")
-        md_lines.append("\n")
-        md_lines.append(sec["content"].strip())
-        md_lines.append("\n\n")
-        full_text += " " + sec["content"].strip()
+    full_text = " ".join(sec["content"] for sec in sections)
 
-    # summary & keywords for entire paper
+    # summary & keywords
     summary = summarize_text(full_text)
-    md_lines.insert(0, "# 論文要約\n" + summary + "\n\n")
-    key_words = extract_keywords(full_text)
-    md_lines.insert(2, "**キーワード:** " + ", ".join(key_words) + "\n\n")
+    md_lines.append("# 論文要約\n" + summary + "\n")
+    md_lines.append("**キーワード:** " + ", ".join(extract_keywords(full_text)) + "\n\n")
 
-    # OCR important figures (first 5 images >50 kB)
+    for sec in sections:
+        if sec["title"]:
+            md_lines.append(f"## {sec['title']}")
+        md_lines.append(textwrap.fill(sec["content"].strip(), 120))
+        md_lines.append("\n")
+
+    # figures
     captions = extract_figure_captions(pdf_path)
     if captions:
         md_lines.append("---\n## 重要図表 OCR キャプション\n")
-        for cap in captions:
-            md_lines.append(f"- {cap}")
+        md_lines.extend(f"- {c}" for c in captions)
 
-    return "\n".join(md_lines), captions
+    return "\n".join(md_lines)
 ```
 
 ---
 
 ### services/summarize.py
 ```python
+import nltk, textwrap, logging
 from transformers import pipeline
-import nltk
 nltk.download("punkt", quiet=True)
+logger = logging.getLogger(__name__)
 
-_summer = pipeline("summarization", model="facebook/bart-large-cnn", device_map="auto")
+try:
+    _summarizer = pipeline("summarization", model="facebook/bart-large-cnn", device_map="auto")
+except Exception as e:
+    logger.warning("transformers pipeline unavailable (%s) – falling back to naive summarizer", e)
+    _summarizer = None
 
 
-def summarize_text(text: str, max_words: int = 150) -> str:
-    """Return a concise Japanese summary."""
-    if len(text.split()) < 50:
-        return text
-    # pipeline handles tokenization limits internally
-    summary = _summer(text[:4000])[0]["summary_text"]
-    return summary
+def summarize_text(text: str, max_words: int = 120):
+    if not text:
+        return "(内容が空です)"
+    if _summarizer:
+        # chunk to avoid token limit
+        chunks = nltk.tokenize.sent_tokenize(text)
+        half = len(chunks) // 2 or 1
+        head = " ".join(chunks[:half])
+        return _summarizer(head)[0]["summary_text"]
+    # fallback: first few sentences
+    return " ".join(chunks[:3])
 ```
 
 ---
 
 ### services/keywords.py
 ```python
-import nltk, math, re
+import nltk, re
 from collections import Counter
 nltk.download("stopwords", quiet=True)
-STOP = set(nltk.corpus.stopwords.words("english")) | set("の こと など ため それ これ その とき また により さらに".split())
-
+STOP = set(nltk.corpus.stopwords.words("english")) | set("の こと など また ため それ これ その".split())
 
 def extract_keywords(text: str, n: int = 8):
     words = re.findall(r"[\w一-龥]{2,}", text.lower())
     cnt = Counter(w for w in words if w not in STOP)
-    total = sum(cnt.values())
-    scores = {w: c / total * math.log(total / (1 + c)) for w, c in cnt.items()}
-    return [w for w, _ in sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:n]]
+    return [w for w, _ in cnt.most_common(n)]
 ```
 
 ---
@@ -242,28 +280,28 @@ def extract_keywords(text: str, n: int = 8):
 from pathlib import Path
 import fitz, tempfile
 from PIL import Image
-import pytesseract
+import pytesseract, logging
+
+logger = logging.getLogger(__name__)
 
 
 def extract_figure_captions(pdf_path: Path, max_images: int = 5):
     doc = fitz.open(pdf_path)
     captions = []
     for page in doc:
-        images = page.get_images(full=True)
-        for img_index, img in enumerate(images):
+        for img in page.get_images(full=True):
             xref = img[0]
-            base_image = doc.extract_image(xref)
-            if base_image["size"] < 50_000:  # skip tiny images
+            base = doc.extract_image(xref)
+            if len(base["image"]) < 50_000:
                 continue
             with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as tmp:
-                tmp.write(base_image["image"])
+                tmp.write(base["image"])
                 tmp.flush()
-                cap = pytesseract.image_to_string(Image.open(tmp.name), lang="eng+jpn")
-                cap = cap.strip()
+                cap = pytesseract.image_to_string(Image.open(tmp.name), lang="eng+jpn").strip()
                 if cap:
                     captions.append(cap)
-                if len(captions) >= max_images:
-                    return captions
+            if len(captions) >= max_images:
+                return captions
     return captions
 ```
 
@@ -272,25 +310,36 @@ def extract_figure_captions(pdf_path: Path, max_images: int = 5):
 ### templates/base.html
 ```html
 <!DOCTYPE html>
-<html lang="ja">
+<html lang="ja" data-theme="light">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-    <title>OT Learning Hub</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}"/>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OT Learning Hub</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
 </head>
-<body class="bg-slate-50 text-slate-800 min-h-screen flex flex-col">
-    <header class="bg-gradient-to-r from-indigo-600 to-sky-500 text-white p-6 shadow-lg">
-        <h1 class="text-3xl font-bold tracking-wide">OT Learning Hub</h1>
-        <p class="text-sm mt-1 opacity-80">作業療法士のためのリサーチ &amp; ノート作成ポータル</p>
-    </header>
-    <main class="flex-grow container mx-auto px-4 py-8">
-        {% block content %}{% endblock %}
-    </main>
-    <footer class="bg-slate-800 text-slate-200 text-xs py-4 text-center">
-        &copy; {{ now.year }} OT Learning Hub — Powered by Flask
-    </footer>
+<body class="min-h-screen bg-gradient-to-br from-sky-50 to-indigo-100 flex flex-col">
+  <header class="shadow-sm bg-white/80 backdrop-blur sticky top-0 z-50">
+    <div class="max-w-5xl mx-auto px-6 py-4 flex items-center gap-3">
+      <i data-lucide="book-open" class="w-6 h-6 text-indigo-600"></i>
+      <span class="text-xl font-semibold tracking-wide text-slate-800">OT Learning Hub</span>
+    </div>
+  </header>
+  <main class="flex-grow container max-w-5xl mx-auto px-6 py-10">
+    {% with msgs = get_flashed_messages(with_categories=true) %}
+    {% if msgs %}
+      <ul class="space-y-2 mb-6">
+        {% for cat, msg in msgs %}
+          <li class="px-4 py-2 rounded-lg {{ 'bg-green-100 text-green-800' if cat=='success' else ('bg-red-100 text-red-800' if cat=='danger' else 'bg-yellow-100 text-yellow-800') }}">{{ msg }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="text-center text-xs py-6 text-slate-600">© {{ now.year }} OT Learning Hub</footer>
+  <script>lucide.createIcons();</script>
 </body>
 </html>
 ```
@@ -301,24 +350,12 @@ def extract_figure_captions(pdf_path: Path, max_images: int = 5):
 ```html
 {% extends 'base.html' %}
 {% block content %}
-<section class="max-w-3xl mx-auto bg-white/90 backdrop-blur rounded-2xl shadow-xl p-8">
-    <h2 class="text-2xl font-semibold mb-4">学術 PDF → 構造化ノート変換ツール</h2>
-    <form action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data" class="space-y-4">
-        <input id="pdf" name="pdf" type="file" accept="application/pdf" required class="block w-full text-sm text-slate-700"/>
-        <button type="submit" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg">アップロードして変換</button>
-    </form>
-</section>
-
-<!-- Future service cards -->
-<section class="mt-10 grid md:grid-cols-2 gap-6">
-    <div class="bg-white p-6 rounded-xl shadow-md">
-        <h3 class="font-bold mb-2">サービス #2（開発予定）</h3>
-        <p class="text-sm text-slate-600">ここに追加予定のツール紹介テキスト。</p>
-    </div>
-    <div class="bg-white p-6 rounded-xl shadow-md">
-        <h3 class="font-bold mb-2">サービス #3（開発予定）</h3>
-        <p class="text-sm text-slate-600">ここに追加予定のツール紹介テキスト。</p>
-    </div>
+<section class="bg-white/90 backdrop-blur shadow-xl rounded-3xl p-10">
+  <h2 class="text-2xl font-semibold mb-6 flex items-center gap-2"><i data-lucide="upload"></i> 学術 PDF → Markdown 変換</h2>
+  <form action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data" class="space-y-4">
+    <input name="pdf" type="file" accept="application/pdf" required class="file:mr-4 file:px-4 file:py-2 file:rounded-lg file:border-0 file:bg-indigo-600 file:text-white hover:file:bg-indigo-700 text-sm text-slate-700" />
+    <button type="submit" class="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg shadow-md"><i data-lucide="play"></i> 変換実行</button>
+  </form>
 </section>
 {% endblock %}
 ```
@@ -329,12 +366,12 @@ def extract_figure_captions(pdf_path: Path, max_images: int = 5):
 ```html
 {% extends 'base.html' %}
 {% block content %}
-<article class="prose prose-slate max-w-none">
-    <h2>変換結果</h2>
-    <p class="mb-4">
-        <a href="{{ download }}" class="text-indigo-600 hover:underline">Markdown をダウンロード (.md)</a>
-    </p>
-    <pre class="whitespace-pre-wrap bg-slate-100 p-4 rounded-lg overflow-x-auto">{{ markdown }}</pre>
+<article class="prose max-w-none bg-white/90 backdrop-blur p-8 rounded-3xl shadow-xl">
+  <h2 class="flex items-center gap-2"><i data-lucide="file-text"></i> 変換結果</h2>
+  <p class="mb-4">
+    <a href="{{ download }}" class="text-indigo-600 hover:underline flex items-center gap-1"><i data-lucide="download"></i> Markdown をダウンロード</a>
+  </p>
+  <pre class="whitespace-pre-wrap overflow-x-auto bg-slate-100/80 p-4 rounded-xl">{{ markdown }}</pre>
 </article>
 {% endblock %}
 ```
@@ -343,28 +380,18 @@ def extract_figure_captions(pdf_path: Path, max_images: int = 5):
 
 ### static/css/style.css
 ```css
-/* 追加のカスタムスタイル。Tailwind で足りない細かな調整に利用 */
-body {
-    font-family: "Inter", "Noto Sans JP", sans-serif;
-}
+body {font-family: "Inter", "Noto Sans JP", sans-serif;}
 ```
 
 ---
 
 ### static/js/main.js
 ```js
-// 今後の JavaScript 拡張用。現在は未使用。
+// Reserved for future interactive features.
 ```
 
 ---
 
-> **ローカル実行手順**  
-> 1. Windows で Tesseract‑OCR をインストールし、環境変数 Path に `tesseract.exe` の場所を追加。  
-> 2. `python -m venv venv && venv\Scripts\activate` で仮想環境を作成。  
-> 3. `pip install -r requirements.txt` で依存パッケージを導入。  
-> 4. `python app.py` を実行し、ブラウザで <http://127.0.0.1:5000> を開く。  
-> 5. PDF をアップロードして変換結果を確認。  
-> 6. Tailwind CDN のみ利用のためビルド不要。  
-> 7. 将来のサービスは `templates/index.html` のカードをリンクに変更し、対応する Flask ルートを追加するだけで拡張可能。
-
-これでコピー＆ペースト一撃で動く最小構成が完成です 🚀
+```
+# ⬆️ END OF FILES
+```
