@@ -1,392 +1,504 @@
-# OT Learning Service – **Clean Re‑Boot (Frontend + Backend Split)**
-
-以下は **静的フロントエンド (GitHub Pages 等で配信)** と **API バックエンド (Render/Fly.io などにデプロイ)** を完全に分離した新構成です。
-- **フロント**はプレーン HTML+Tailwind+Fetch API だけ。サーバーサイドテンプレートは使わないので、GitHub Pages 上でもそのまま動きます。
-- **バックエンド**は FastAPI。`/convert` に PDF を POST すると Markdown を JSON で返し、`/download/{id}` で .md ファイルを返します。CORS 設定済み。
-- **Dockerfile** 付き。Render なら “Docker” モードでリポジトリを指すだけで HTTPS API が立ち上がります。
-
----
-
-## 📁 プロジェクト構成
-```text
-📂 ot_learning_service/
-│
-├─ frontend/
-│   ├─ index.html
-│   ├─ styles.css        # 任意の追加 CSS (最小限のみ)
-│   └─ app.js            # 変換リクエスト & UI 制御
-│
-└─ backend/
-    ├─ main.py           # FastAPI アプリ本体
-    ├─ requirements.txt
-    ├─ Dockerfile        # コンテナ化 (Render/Fly 用)
-    ├─ services/
-    │    ├─ __init__.py
-    │    ├─ pdf_to_markdown.py
-    │    ├─ summarize.py
-    │    ├─ keywords.py
-    │    └─ ocr_figures.py
-    └─ storage/          # 生成ファイル保存 (自動生成)
-```
-
----
-
-# ✨ Frontend
-
-### frontend/index.html
-```html
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>OT Learning Hub</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <link rel="stylesheet" href="styles.css" />
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OT Research Hub - 作業療法士研究・学習支援プラットフォーム</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: #333;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        header {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 30px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            text-align: center;
+        }
+
+        h1 {
+            color: #2c3e50;
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            font-weight: 700;
+        }
+
+        .subtitle {
+            color: #7f8c8d;
+            font-size: 1.2em;
+            margin-bottom: 20px;
+        }
+
+        .nav-pills {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .nav-pill {
+            padding: 10px 20px;
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            color: white;
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: 600;
+        }
+
+        .nav-pill:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.2);
+        }
+
+        .nav-pill.active {
+            background: linear-gradient(45deg, #2c3e50, #3498db);
+            transform: translateY(-2px);
+        }
+
+        .main-content {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 30px;
+            margin-top: 30px;
+        }
+
+        .tool-card {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            transition: all 0.3s ease;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+        }
+
+        .tool-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 30px 60px rgba(0, 0, 0, 0.15);
+        }
+
+        .tool-icon {
+            width: 60px;
+            height: 60px;
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            border-radius: 15px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 20px;
+            color: white;
+            font-size: 24px;
+        }
+
+        .tool-title {
+            font-size: 1.5em;
+            font-weight: 700;
+            margin-bottom: 15px;
+            color: #2c3e50;
+        }
+
+        .tool-description {
+            color: #7f8c8d;
+            line-height: 1.6;
+            margin-bottom: 20px;
+        }
+
+        .tool-features {
+            list-style: none;
+            margin-bottom: 20px;
+        }
+
+        .tool-features li {
+            padding: 5px 0;
+            color: #555;
+            position: relative;
+            padding-left: 20px;
+        }
+
+        .tool-features li:before {
+            content: "✓";
+            color: #27ae60;
+            font-weight: bold;
+            position: absolute;
+            left: 0;
+        }
+
+        .tool-button {
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            color: white;
+            border: none;
+            padding: 12px 25px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            width: 100%;
+        }
+
+        .tool-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.2);
+        }
+
+        .quick-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 20px;
+            text-align: center;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+        }
+
+        .stat-number {
+            font-size: 2em;
+            font-weight: 700;
+            color: #667eea;
+            margin-bottom: 5px;
+        }
+
+        .stat-label {
+            color: #7f8c8d;
+            font-size: 0.9em;
+        }
+
+        .recent-activity {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 30px;
+            margin-top: 30px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+        }
+
+        .activity-item {
+            padding: 15px 0;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .activity-item:last-child {
+            border-bottom: none;
+        }
+
+        .activity-icon {
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 16px;
+        }
+
+        .activity-content {
+            flex: 1;
+        }
+
+        .activity-title {
+            font-weight: 600;
+            color: #2c3e50;
+            margin-bottom: 5px;
+        }
+
+        .activity-time {
+            color: #7f8c8d;
+            font-size: 0.9em;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 10px;
+            }
+            
+            .main-content {
+                grid-template-columns: 1fr;
+            }
+            
+            .nav-pills {
+                flex-wrap: wrap;
+                gap: 10px;
+            }
+            
+            .nav-pill {
+                flex: 1;
+                min-width: 120px;
+            }
+        }
+
+        .fade-in {
+            opacity: 0;
+            transform: translateY(30px);
+            animation: fadeIn 0.6s ease forwards;
+        }
+
+        @keyframes fadeIn {
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+    </style>
 </head>
-<body class="min-h-screen flex flex-col bg-gradient-to-br from-indigo-50 to-sky-100">
-  <header class="bg-white/80 backdrop-blur shadow sticky top-0 z-50">
-    <div class="max-w-4xl mx-auto px-6 py-4 flex items-center gap-2 text-indigo-700 font-semibold">
-      <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6l4 2" /></svg>
-      OT Learning Hub
+<body>
+    <div class="container">
+        <header class="fade-in">
+            <h1>OT Research Hub</h1>
+            <p class="subtitle">作業療法士のための研究・学習支援プラットフォーム</p>
+            <div class="nav-pills">
+                <button class="nav-pill active" onclick="showSection('dashboard')">ダッシュボード</button>
+                <button class="nav-pill" onclick="showSection('papers')">論文管理</button>
+                <button class="nav-pill" onclick="showSection('cases')">症例記録</button>
+                <button class="nav-pill" onclick="showSection('data')">データ収集</button>
+                <button class="nav-pill" onclick="showSection('learning')">学習ツール</button>
+            </div>
+        </header>
+
+        <div id="dashboard" class="section">
+            <div class="quick-stats fade-in">
+                <div class="stat-card">
+                    <div class="stat-number">24</div>
+                    <div class="stat-label">保存済み論文</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number">8</div>
+                    <div class="stat-label">症例記録</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number">156</div>
+                    <div class="stat-label">データポイント</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number">12</div>
+                    <div class="stat-label">学習セッション</div>
+                </div>
+            </div>
+
+            <div class="main-content">
+                <div class="tool-card fade-in">
+                    <div class="tool-icon">📚</div>
+                    <div class="tool-title">論文管理システム</div>
+                    <div class="tool-description">英文・日本語論文の検索、保存、要約、引用管理を効率的に行えます</div>
+                    <ul class="tool-features">
+                        <li>論文検索・自動ダウンロード</li>
+                        <li>AI要約機能</li>
+                        <li>引用文献管理</li>
+                        <li>タグ・カテゴリ分類</li>
+                    </ul>
+                    <button class="tool-button" onclick="openTool('papers')">論文管理を開く</button>
+                </div>
+
+                <div class="tool-card fade-in">
+                    <div class="tool-icon">📋</div>
+                    <div class="tool-title">症例記録システム</div>
+                    <div class="tool-description">患者症例の記録、分析、レポート作成を体系的に管理できます</div>
+                    <ul class="tool-features">
+                        <li>症例テンプレート</li>
+                        <li>評価指標管理</li>
+                        <li>経過記録</li>
+                        <li>匿名化機能</li>
+                    </ul>
+                    <button class="tool-button" onclick="openTool('cases')">症例記録を開く</button>
+                </div>
+
+                <div class="tool-card fade-in">
+                    <div class="tool-icon">📊</div>
+                    <div class="tool-title">データ収集・分析</div>
+                    <div class="tool-description">研究データの収集、統計分析、グラフ作成を支援します</div>
+                    <ul class="tool-features">
+                        <li>データ入力フォーム</li>
+                        <li>統計分析機能</li>
+                        <li>グラフ・チャート作成</li>
+                        <li>データエクスポート</li>
+                    </ul>
+                    <button class="tool-button" onclick="openTool('data')">データ分析を開く</button>
+                </div>
+
+                <div class="tool-card fade-in">
+                    <div class="tool-icon">🎓</div>
+                    <div class="tool-title">学習支援ツール</div>
+                    <div class="tool-description">継続的な学習とスキルアップをサポートする各種ツールです</div>
+                    <ul class="tool-features">
+                        <li>クイズ・テスト機能</li>
+                        <li>学習進捗管理</li>
+                        <li>用語集・辞書</li>
+                        <li>学習計画作成</li>
+                    </ul>
+                    <button class="tool-button" onclick="openTool('learning')">学習ツールを開く</button>
+                </div>
+            </div>
+
+            <div class="recent-activity fade-in">
+                <h2 style="margin-bottom: 20px; color: #2c3e50;">最近の活動</h2>
+                <div class="activity-item">
+                    <div class="activity-icon">📚</div>
+                    <div class="activity-content">
+                        <div class="activity-title">新しい論文を保存しました</div>
+                        <div class="activity-time">「脳卒中患者の上肢機能改善に関する研究」 - 2時間前</div>
+                    </div>
+                </div>
+                <div class="activity-item">
+                    <div class="activity-icon">📋</div>
+                    <div class="activity-content">
+                        <div class="activity-title">症例記録を更新しました</div>
+                        <div class="activity-time">患者ID: OT-2024-001 - 5時間前</div>
+                    </div>
+                </div>
+                <div class="activity-item">
+                    <div class="activity-icon">📊</div>
+                    <div class="activity-content">
+                        <div class="activity-title">データ分析を完了しました</div>
+                        <div class="activity-time">「ADL改善度調査」 - 1日前</div>
+                    </div>
+                </div>
+                <div class="activity-item">
+                    <div class="activity-icon">🎓</div>
+                    <div class="activity-content">
+                        <div class="activity-title">学習セッションを完了しました</div>
+                        <div class="activity-time">「認知機能評価」クイズ - 2日前</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="papers" class="section" style="display: none;">
+            <div class="tool-card fade-in">
+                <h2 style="margin-bottom: 20px; color: #2c3e50;">論文管理システム</h2>
+                <p>このセクションでは論文の検索、保存、要約、引用管理ができます。</p>
+                <div style="margin-top: 20px; padding: 20px; background: #f8f9fa; border-radius: 10px;">
+                    <h3>機能概要：</h3>
+                    <ul style="margin-top: 10px; padding-left: 20px;">
+                        <li>PubMed、Google Scholar等からの論文検索</li>
+                        <li>PDF自動ダウンロード・保存</li>
+                        <li>AI による論文要約生成</li>
+                        <li>引用文献の自動管理</li>
+                        <li>タグ・カテゴリでの分類</li>
+                        <li>全文検索機能</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <div id="cases" class="section" style="display: none;">
+            <div class="tool-card fade-in">
+                <h2 style="margin-bottom: 20px; color: #2c3e50;">症例記録システム</h2>
+                <p>患者の症例記録を体系的に管理し、分析できます。</p>
+                <div style="margin-top: 20px; padding: 20px; background: #f8f9fa; border-radius: 10px;">
+                    <h3>機能概要：</h3>
+                    <ul style="margin-top: 10px; padding-left: 20px;">
+                        <li>症例記録テンプレート</li>
+                        <li>評価指標の数値管理</li>
+                        <li>治療経過の記録</li>
+                        <li>画像・動画の添付</li>
+                        <li>匿名化処理</li>
+                        <li>レポート自動生成</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <div id="data" class="section" style="display: none;">
+            <div class="tool-card fade-in">
+                <h2 style="margin-bottom: 20px; color: #2c3e50;">データ収集・分析システム</h2>
+                <p>研究データの収集から分析まで一貫してサポートします。</p>
+                <div style="margin-top: 20px; padding: 20px; background: #f8f9fa; border-radius: 10px;">
+                    <h3>機能概要：</h3>
+                    <ul style="margin-top: 10px; padding-left: 20px;">
+                        <li>カスタムデータ入力フォーム</li>
+                        <li>基本統計・相関分析</li>
+                        <li>グラフ・チャート作成</li>
+                        <li>CSV/Excelエクスポート</li>
+                        <li>データ可視化</li>
+                        <li>統計レポート生成</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <div id="learning" class="section" style="display: none;">
+            <div class="tool-card fade-in">
+                <h2 style="margin-bottom: 20px; color: #2c3e50;">学習支援ツール</h2>
+                <p>継続的な学習とスキルアップをサポートします。</p>
+                <div style="margin-top: 20px; padding: 20px; background: #f8f9fa; border-radius: 10px;">
+                    <h3>機能概要：</h3>
+                    <ul style="margin-top: 10px; padding-left: 20px;">
+                        <li>分野別クイズ・テスト</li>
+                        <li>学習進捗の追跡</li>
+                        <li>作業療法用語集</li>
+                        <li>学習計画の作成</li>
+                        <li>復習リマインダー</li>
+                        <li>知識の定着度測定</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
     </div>
-  </header>
 
-  <main class="flex-grow container max-w-4xl mx-auto px-6 py-10">
-    <section class="bg-white/90 backdrop-blur p-10 rounded-3xl shadow-xl">
-      <h1 class="text-2xl font-bold mb-6">学術 PDF → Markdown 変換</h1>
-      <form id="convertForm" class="space-y-4">
-        <input id="pdfInput" type="file" accept="application/pdf" required
-               class="file:mr-4 file:px-4 file:py-2 file:rounded-lg file:border-0 file:bg-indigo-600 file:text-white hover:file:bg-indigo-700 text-sm" />
-        <button id="submitBtn" type="submit"
-                class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg shadow">変換実行</button>
-      </form>
-      <p id="status" class="mt-4 text-sm text-slate-600"></p>
-    </section>
+    <script>
+        function showSection(sectionId) {
+            // Hide all sections
+            const sections = document.querySelectorAll('.section');
+            sections.forEach(section => {
+                section.style.display = 'none';
+            });
+            
+            // Show selected section
+            document.getElementById(sectionId).style.display = 'block';
+            
+            // Update nav pills
+            const pills = document.querySelectorAll('.nav-pill');
+            pills.forEach(pill => {
+                pill.classList.remove('active');
+            });
+            
+            event.target.classList.add('active');
+            
+            // Add fade-in animation to new content
+            const newContent = document.getElementById(sectionId);
+            newContent.classList.add('fade-in');
+        }
 
-    <section id="resultSection" class="hidden mt-10 bg-white/90 backdrop-blur p-8 rounded-3xl shadow-xl">
-      <div class="flex justify-between items-center mb-4">
-        <h2 class="text-xl font-semibold">変換結果</h2>
-        <a id="downloadLink" href="#" class="text-indigo-600 hover:underline" download>Markdown をダウンロード</a>
-      </div>
-      <pre id="markdownOutput" class="whitespace-pre-wrap overflow-x-auto bg-slate-100 p-4 rounded-xl text-sm"></pre>
-    </section>
-  </main>
+        function openTool(toolName) {
+            alert(`${toolName} ツールを開きます。\nこの機能は今後実装予定です。`);
+        }
 
-  <script src="app.js"></script>
+        // Initialize fade-in animations
+        document.addEventListener('DOMContentLoaded', function() {
+            const elements = document.querySelectorAll('.fade-in');
+            elements.forEach((element, index) => {
+                element.style.animationDelay = `${index * 0.1}s`;
+            });
+        });
+    </script>
 </body>
 </html>
-```
-
-### frontend/app.js
-```js
-// ======== 設定 ========
-// バックエンド FastAPI の URL（Render 等にデプロイ後に書き換え）
-const BACKEND_URL = "https://ot-learning-api.onrender.com"; // ←例
-// ======================
-
-const form = document.getElementById("convertForm");
-const pdfInput = document.getElementById("pdfInput");
-const statusP = document.getElementById("status");
-const resultSec = document.getElementById("resultSection");
-const markdownOutput = document.getElementById("markdownOutput");
-const downloadLink = document.getElementById("downloadLink");
-
-form.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const file = pdfInput.files[0];
-  if (!file) return;
-
-  statusP.textContent = "アップロード中…";
-  const fd = new FormData();
-  fd.append("pdf", file);
-
-  try {
-    const res = await fetch(`${BACKEND_URL}/convert`, {
-      method: "POST",
-      body: fd,
-    });
-    if (!res.ok) throw new Error(`Server responded ${res.status}`);
-    const data = await res.json();
-
-    markdownOutput.textContent = data.markdown;
-    downloadLink.href = `${BACKEND_URL}/download/${data.file_id}`;
-
-    statusP.textContent = "変換完了！";
-    resultSec.classList.remove("hidden");
-    // スクロール
-    resultSec.scrollIntoView({ behavior: "smooth" });
-  } catch (err) {
-    console.error(err);
-    statusP.textContent = "エラーが発生しました。PDF が正しいか確認してください。";
-  }
-});
-```
-
-### frontend/styles.css (任意)
-```css
-body {font-family: "Inter", "Noto Sans JP", sans-serif;}
-```
-
----
-
-# 🚀 Backend (FastAPI)
-
-### backend/requirements.txt
-```text
-fastapi==0.111.0
-uvicorn[standard]==0.29.0
-PyMuPDF==1.24.0
-pdf2image==1.17.0
-pytesseract==0.3.10
-Pillow==10.3.0
-transformers==4.42.0
-sentencepiece==0.2.0
-torch==2.2.2
-nltk==3.8.1
-python‑multipart==0.0.6
-```
-
-### backend/main.py
-```python
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import FileResponse
-from fastapi.middleware.cors import CORSMiddleware
-from pathlib import Path
-import uuid, shutil, logging
-from services.pdf_to_markdown import convert_pdf
-
-BASE_DIR = Path(__file__).resolve().parent
-STORAGE = BASE_DIR / "storage"
-STORAGE.mkdir(exist_ok=True)
-
-app = FastAPI(title="OT Learning API")
-
-# CORS (フロント URL を登録 / * でも可)
-origins = ["*"]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-
-@app.post("/convert")
-async def convert(pdf: UploadFile = File(...)):
-    if pdf.content_type != "application/pdf":
-        raise HTTPException(status_code=415, detail="PDF only")
-
-    file_id = uuid.uuid4().hex
-    pdf_path = STORAGE / f"{file_id}.pdf"
-    md_path = STORAGE / f"{file_id}.md"
-
-    # save
-    with pdf_path.open("wb") as f:
-        shutil.copyfileobj(pdf.file, f)
-    logging.info("Saved %s", pdf_path.name)
-
-    try:
-        markdown = convert_pdf(pdf_path)
-    except Exception as e:
-        logging.exception("convert failed: %s", e)
-        raise HTTPException(status_code=500, detail="conversion error")
-
-    md_path.write_text(markdown, encoding="utf-8")
-    return {"file_id": file_id, "markdown": markdown}
-
-@app.get("/download/{file_id}")
-async def download(file_id: str):
-    md_path = STORAGE / f"{file_id}.md"
-    if not md_path.exists():
-        raise HTTPException(status_code=404, detail="not found")
-    return FileResponse(md_path, media_type="text/markdown", filename=f"{file_id}.md")
-```
-
-### backend/Dockerfile
-```dockerfile
-FROM python:3.11-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY . .
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
-```
-
-### backend/services/ 以下
-
-> **変換ロジックは前回と同様** ですが、`fitz.TextBlock` バグ修正等は反映済み。全文は長くなるため ➡️ [pdf_to_markdown.py ほかは変わっていません] として省略せずに**全部**載せます。
-
-#### backend/services/__init__.py
-```python
-# services package marker
-```
-
-#### backend/services/pdf_to_markdown.py
-```python
-"""PDF → Markdown conversion pipeline (2‑pass heading detection)."""
-from pathlib import Path
-import statistics, textwrap, logging
-import fitz  # PyMuPDF
-from .summarize import summarize_text
-from .keywords import extract_keywords
-from .ocr_figures import extract_figure_captions
-
-logger = logging.getLogger(__name__)
-
-# ---------- helpers ----------
-
-def _collect_font_sizes(doc):
-    sizes = []
-    for page in doc:
-        for block in page.get_text("dict").get("blocks", []):
-            if block.get("type") != 0:
-                continue
-            for line in block.get("lines", []):
-                for span in line.get("spans", []):
-                    sizes.append(span["size"])
-    return sizes or [11]
-
-
-def _text_from_block(block_dict):
-    return "".join(span["text"] for line in block_dict.get("lines", []) for span in line.get("spans", [])).strip()
-
-# ---------- main ----------
-
-def convert_pdf(pdf_path: Path) -> str:
-    logger.info("Converting %s", pdf_path.name)
-    doc = fitz.open(pdf_path)
-
-    body_size = statistics.mode(round(s) for s in _collect_font_sizes(doc))
-    heading_threshold = body_size + 1
-
-    sections = []
-    current = {"title": "", "content": ""}
-
-    for page in doc:
-        for block in page.get_text("dict").get("blocks", []):
-            if block.get("type") != 0:
-                continue
-            txt = _text_from_block(block)
-            if not txt:
-                continue
-            span_size = block["lines"][0]["spans"][0]["size"]
-            if span_size >= heading_threshold and len(txt) < 120:
-                if current["title"] or current["content"]:
-                    sections.append(current)
-                current = {"title": txt, "content": ""}
-            else:
-                current["content"] += " " + txt
-    if current["title"] or current["content"]:
-        sections.append(current)
-
-    full_text = " ".join(sec["content"] for sec in sections)
-
-    md_lines = [
-        "# 論文要約\n" + summarize_text(full_text) + "\n",
-        "**キーワード:** " + ", ".join(extract_keywords(full_text)) + "\n\n",
-    ]
-
-    for sec in sections:
-        if sec["title"]:
-            md_lines.append(f"## {sec['title']}")
-        md_lines.append(textwrap.fill(sec["content"].strip(), 120))
-        md_lines.append("\n")
-
-    captions = extract_figure_captions(pdf_path)
-    if captions:
-        md_lines.append("---\n## 重要図表 OCR キャプション\n")
-        md_lines.extend(f"- {c}" for c in captions)
-
-    return "\n".join(md_lines)
-```
-
-#### backend/services/summarize.py
-```python
-import nltk, logging
-from transformers import pipeline
-nltk.download("punkt", quiet=True)
-logger = logging.getLogger(__name__)
-
-try:
-    _summarizer = pipeline("summarization", model="facebook/bart-large-cnn", device_map="auto")
-except Exception as e:
-    logger.warning("transformers unavailable (%s) – fallback", e)
-    _summarizer = None
-
-def summarize_text(text: str):
-    if not text:
-        return "(内容がありません)"
-    if _summarizer:
-        # 簡易チャンク: 4k 文字以内に抑制
-        return _summarizer(text[:4000])[0]["summary_text"]
-    return " ".join(nltk.sent_tokenize(text)[:3])
-```
-
-#### backend/services/keywords.py
-```python
-import re, nltk
-from collections import Counter
-nltk.download("stopwords", quiet=True)
-JP_STOP = set("の こと など また ため それ これ その より 及び".split())
-STOP = set(nltk.corpus.stopwords.words("english")) | JP_STOP
-
-def extract_keywords(text: str, n: int = 8):
-    words = re.findall(r"[\w一-龥]{2,}", text.lower())
-    cnt = Counter(w for w in words if w not in STOP)
-    return [w for w, _ in cnt.most_common(n)]
-```
-
-#### backend/services/ocr_figures.py
-```python
-from pathlib import Path
-import fitz, tempfile
-from PIL import Image
-import pytesseract, logging
-logger = logging.getLogger(__name__)
-
-
-def extract_figure_captions(pdf_path: Path, max_images: int = 5):
-    doc = fitz.open(pdf_path)
-    captions = []
-    for page in doc:
-        for img in page.get_images(full=True):
-            xref = img[0]
-            base = doc.extract_image(xref)
-            if len(base["image"]) < 50_000:
-                continue
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as tmp:
-                tmp.write(base["image"])
-                tmp.flush()
-                cap = pytesseract.image_to_string(Image.open(tmp.name), lang="eng+jpn").strip()
-                if cap:
-                    captions.append(cap)
-            if len(captions) >= max_images:
-                return captions
-    return captions
-```
-
----
-
-## 🏗️ デプロイ手順 (最速例)
-1. **GitHub リポジトリを作成**。`frontend/` と `backend/` をコミット。
-2. GitHub Pages を `frontend/` で有効化 (ブランチ `main` / ディレクトリ `frontend`).
-3. **Render** で “+ New → Web Service → Docker” を選択し、リポジトリの `backend/` サブフォルダを指定。
-   - Dockerfile ビルドでそのまま起動。
-   - URL 例: `https://ot-learning-api.onrender.com` を BACKEND_URL に設定。
-4. DNS/ドメインを張れば完成。フロントは静的に、API はクラウドランタイムで動きます。
-
-> **ローカルテスト**:
-> ```bash
-> # backend
-> cd backend
-> python -m venv venv && source venv/bin/activate
-> pip install -r requirements.txt
-> uvicorn main:app --reload --port 8000
-> # frontend
-> Live Server などで `frontend/index.html` を開く → BACKEND_URL を `http://localhost:8000` に変更
-> ```
-
-これで “文字だらけ” 問題（テンプレート未解釈）と “ページ到達できない” 問題（GitHub Pages は静的のみ）を根本解決できます。コピペ & デプロイでお試しください 🚀
